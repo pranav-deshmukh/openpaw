@@ -6,47 +6,63 @@ import path from "path";
 import TelegramBot from "node-telegram-bot-api";
 
 import { notesTools, executeNotesTool } from "./tools/notes";
-import { WebhookServer } from "./server/webhook-server";
-import { getLatestEmailSnippet } from "./tools/gmail-webhook";
+import { emailTools, executeEmailTool } from "./tools/email";
 import { telegramTool, sendTelegramMessage } from "./tools/telegram";
 
-//telegram bot
+import { WebhookServer } from "./server/webhook-server";
+import { getLatestEmailSnippet } from "./tools/gmail-webhook";
+
+/* =====================================================
+   TELEGRAM BOT (input channel + notifications)
+===================================================== */
 
 const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN!, {
   polling: true,
 });
 
-//openaiclient
+/* =====================================================
+   OPENAI CLIENT
+===================================================== */
 
 const openai = new OpenAI({
   apiKey: process.env.OPENROUTER_API_KEY,
   baseURL: "https://openrouter.ai/api/v1",
 });
 
-//tools
+/* =====================================================
+   TOOL DEFINITIONS (for OpenAI)
+===================================================== */
 
-const openAITools = [...notesTools, telegramTool].map((tool) => ({
-  type: "function" as const,
-  function: {
-    name: tool.name,
-    description: tool.description,
-    parameters: tool.input_schema,
-  },
-}));
+const openAITools = [...notesTools, telegramTool, ...emailTools].map(
+  (tool) => ({
+    type: "function" as const,
+    function: {
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.input_schema,
+    },
+  }),
+);
 
-// prompts
+/* =====================================================
+   PROMPTS
+===================================================== */
 
 const chatSystemPrompt =
-  "You are a helpful AI assistant with note-taking capabilities. Use tools when needed and confirm actions.";
+  "You are a helpful AI assistant with note-taking and email capabilities. Use tools when needed.";
 
 let mailSkillPrompt = "";
 
-  //  CHAT HISTORY (ONLY FOR USER CHAT)
+/* =====================================================
+   CHAT HISTORY (only for human conversations)
+===================================================== */
 
 const conversationHistory: OpenAI.Chat.Completions.ChatCompletionMessageParam[] =
   [{ role: "system", content: chatSystemPrompt }];
 
-//cli
+/* =====================================================
+   CLI INTERFACE
+===================================================== */
 
 const rl = readline.createInterface({
   input: process.stdin,
@@ -54,12 +70,46 @@ const rl = readline.createInterface({
   prompt: "\n> ",
 });
 
-  //  CORE AGENT FUNCTION
+/* =====================================================
+   TOOL ROUTER
+   Decides which executor handles each tool
+===================================================== */
+
+async function executeTool(toolName: string, args: any): Promise<string> {
+  // Email tools
+  if (emailTools.some((t) => t.name === toolName)) {
+    const result = await executeEmailTool(toolName, args);
+
+    // notify only after sending
+    if (toolName === "send_email") {
+      await sendTelegramMessage(result);
+    }
+
+    return result;
+  }
+
+  // Telegram tool
+  if (toolName === "send_telegram_message") {
+    return await sendTelegramMessage(args.message);
+  }
+
+  // Notes tools
+  if (notesTools.some((t) => t.name === toolName)) {
+    return await executeNotesTool(toolName, args);
+  }
+
+  throw new Error(`Unknown tool: ${toolName}`);
+}
+
+/* =====================================================
+   CORE AGENT LOOP
+===================================================== */
 
 async function chatWithTools(
   userInput: string,
   isolated = false
 ): Promise<string> {
+  // isolated runs = email events (no history)
   const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] =
     isolated
       ? [
@@ -81,6 +131,8 @@ async function chatWithTools(
     conversationHistory.push({ role: "user", content: userInput });
   }
 
+  /* ---------- Tool Calls ---------- */
+
   if (message.tool_calls) {
     if (!isolated) conversationHistory.push(message);
 
@@ -94,10 +146,10 @@ async function chatWithTools(
 
       let result = "";
 
-      if (toolName === "send_telegram_message") {
-        result = await sendTelegramMessage(args.message);
-      } else {
-        result = await executeNotesTool(toolName, args);
+      try {
+        result = await executeTool(toolName, args);
+      } catch (err: any) {
+        result = `Tool error: ${err.message}`;
       }
 
       if (!isolated) {
@@ -109,6 +161,7 @@ async function chatWithTools(
       }
     }
 
+    // final assistant response after tools
     const followUp = await openai.chat.completions.create({
       model: "openai/gpt-4o-mini",
       messages: isolated ? messages : conversationHistory,
@@ -128,6 +181,8 @@ async function chatWithTools(
     return finalMessage;
   }
 
+  /* ---------- Normal response ---------- */
+
   const content = message.content || "";
 
   console.log(`\n${content}`);
@@ -142,7 +197,9 @@ async function chatWithTools(
   return content;
 }
 
-//email event processor
+/* =====================================================
+   EMAIL EVENT PROCESSOR
+===================================================== */
 
 async function processEmailEvent(email: any) {
   const emailPrompt = `
@@ -159,17 +216,18 @@ Use tools when needed.
   await chatWithTools(emailPrompt, true); // isolated run
 }
 
-
-
-
-//main
+/* =====================================================
+   MAIN APP START
+===================================================== */
 
 async function main() {
+  // load email skill prompt
   mailSkillPrompt = await fs.readFile(
     path.join(process.cwd(), "src", "skills", "mail.md"),
     "utf-8"
   );
 
+  /* ---------- Webhook Server ---------- */
 
   const webhookServer = new WebhookServer(3000);
 
@@ -195,10 +253,10 @@ async function main() {
   webhookServer.start();
 
   console.log("➡️ Expose webhook with: ngrok http 3000");
-
-
-  console.log("🤖 Simple Note-Taking Agent");
+  console.log("🤖 Agent Running...");
   console.log("━".repeat(50));
+
+  /* ---------- CLI ---------- */
 
   rl.prompt();
 
@@ -227,7 +285,9 @@ async function main() {
   });
 }
 
-
+/* =====================================================
+   TELEGRAM INPUT → AGENT
+===================================================== */
 
 bot.on("message", async (msg) => {
   const text = msg.text;
@@ -237,7 +297,8 @@ bot.on("message", async (msg) => {
   await bot.sendMessage(msg.chat.id, response);
 });
 
-
-//start
+/* =====================================================
+   START
+===================================================== */
 
 main();

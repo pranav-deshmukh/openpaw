@@ -10,7 +10,9 @@ async function main() {
 
   const authUrl = oAuth2Client.generateAuthUrl({
     access_type: "offline",
-    scope: ["https://www.googleapis.com/auth/gmail.readonly"]
+    scope: ["https://www.googleapis.com/auth/gmail.readonly",
+      "https://www.googleapis.com/auth/gmail.send"
+    ]
   });
 
   console.log("Authorize this app by visiting this URL:\n", authUrl);
