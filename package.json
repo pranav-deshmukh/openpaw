@@ -16,10 +16,12 @@
     "dotenv": "^17.2.4",
     "express": "^5.2.1",
     "googleapis": "^171.4.0",
+    "node-telegram-bot-api": "^0.67.0",
     "openai": "^6.19.0"
   },
   "devDependencies": {
     "@types/node": "^25.2.3",
+    "@types/node-telegram-bot-api": "^0.64.13",
     "ts-node": "^10.9.2",
     "typescript": "^5.9.3"
   }
