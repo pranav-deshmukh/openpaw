@@ -11,6 +11,8 @@ import { telegramTool, sendTelegramMessage } from "./tools/telegram";
 
 import { WebhookServer } from "./server/webhook-server";
 import { getLatestEmailSnippet } from "./tools/gmail-webhook";
+import { notionTools, executeNotionTool } from "./tools/notion";
+
 
 /* =====================================================
    TELEGRAM BOT (input channel + notifications)
@@ -33,7 +35,7 @@ const openai = new OpenAI({
    TOOL DEFINITIONS (for OpenAI)
 ===================================================== */
 
-const openAITools = [...notesTools, telegramTool, ...emailTools].map(
+const openAITools = [...notesTools, telegramTool, ...emailTools, ...notionTools].map(
   (tool) => ({
     type: "function" as const,
     function: {
@@ -97,6 +99,11 @@ async function executeTool(toolName: string, args: any): Promise<string> {
   if (notesTools.some((t) => t.name === toolName)) {
     return await executeNotesTool(toolName, args);
   }
+
+  if (notionTools.some(t => t.name === toolName)) {
+  return await executeNotionTool(toolName, args);
+}
+
 
   throw new Error(`Unknown tool: ${toolName}`);
 }
