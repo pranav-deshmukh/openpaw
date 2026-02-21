@@ -7,3 +7,6 @@ data/
 node_modules/
 dist/
 
+/openpaw-memory
+
+*.db
