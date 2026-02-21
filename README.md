@@ -1,4 +1,6 @@
-//memory storage readme
+# OpenPaw
+
+is a personal AI agent — think of it like having your own locally-run assistant that lives across your tools. You message it on Telegram, it watches your Gmail and reacts to emails automatically, it can save notes, manage Notion, and send you notifications. All of it is driven by one agent loop in TypeScript. You own it completely, it runs on your machine, no SaaS, no subscriptions.
 
 # OpenPaw Memory System
 
@@ -21,62 +23,6 @@ openpaw-memory/
 | **Long-term**  | `MEMORY.md` (upsert by ID)     | Forever              | Facts, preferences, decisions      |
 | **Daily logs** | `memory/YYYY-MM-DD.md`         | Forever, append-only | Session summaries, ephemeral notes |
 | **Index**      | SQLite FTS5 + BM25             | Rebuilt on start     | Fast full-text search              |
-
-## Installation
-
-```bash
-npm install better-sqlite3
-npm install --save-dev @types/better-sqlite3
-```
-
-## Setup
-
-### 1. Copy files into your project
-
-```
-src/
-  memory/
-    memory-manager.ts   ← Core engine
-    memory-tools.ts     ← OpenAI tool definitions
-```
-
-### 2. Update your `index.ts`
-
-See `index-with-memory.ts` for the full diff. Key changes:
-
-```typescript
-import { memory } from "./memory/memory-manager";
-import {
-  memoryOpenAITools,
-  executeMemoryTool,
-  memoryTools,
-} from "./memory/memory-tools";
-
-// Init before starting
-await memory.init();
-
-// Inject context into system prompt
-const memoryContext = await memory.buildContextBlock(userInput);
-
-// Register tools
-const openAITools = [...existingTools, ...memoryOpenAITools];
-
-// Route tool calls
-if (memoryTools.some((t) => t.name === toolName)) {
-  return await executeMemoryTool(toolName, args);
-}
-
-// Flush on exit
-await memory.flushSession();
-```
-
-### 3. Optional env vars
-
-```env
-OPENPAW_MEMORY_DIR=./openpaw-memory   # where to store memory files
-OPENPAW_SHORT_TERM_WINDOW=20           # max messages in short-term window
-OPENPAW_MAX_FACTS=200                  # max entries in MEMORY.md before trimming
-```
 
 ## Agent Behavior
 
