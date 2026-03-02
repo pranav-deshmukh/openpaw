@@ -1,28 +1,35 @@
 import "dotenv/config";
-import readline from "readline";
 import OpenAI from "openai";
 import fs from "fs/promises";
 import path from "path";
-import TelegramBot from "node-telegram-bot-api";
 
 import { notesTools, executeNotesTool } from "./tools/notes";
 import { emailTools, executeEmailTool } from "./tools/email";
-import { telegramTool, sendTelegramMessage } from "./tools/telegram";
 
 import { WebhookServer } from "./server/webhook-server";
 import { getLatestEmailSnippet } from "./tools/gmail-webhook";
 import { notionTools, executeNotionTool } from "./tools/notion";
 
+import { ToolRegistry } from "./tools/tool-registry";
+import { WebSearchTool, WebFetchTool, DuckDuckGoSearchTool } from "./tools/web";
+import { SendMessageTool } from "./tools/message";
+import { TelegramChannel } from "./channel/telegram";
+
+import { channelRegistry } from "./channel/channel-registry";
+import { inboundQueue } from "./queue/message-queue";
+import { MessageProcessor } from "./queue/message-processor";
+import { CLI } from "./cli/cli";
+import crypto from "crypto";
+
 import { memory } from "./memory/memory-manager";
 import { memoryOpenAITools, executeMemoryTool, memoryTools } from "./memory/memory-tools";
 
 /* =====================================================
-   TELEGRAM BOT (input channel + notifications)
+   TELEGRAM CHANNEL
 ===================================================== */
 
-const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN!, {
-  polling: true,
-});
+const telegram = new TelegramChannel();
+channelRegistry.register("telegram", telegram);
 
 /* =====================================================
    OPENAI CLIENT
@@ -34,11 +41,23 @@ const openai = new OpenAI({
 });
 
 /* =====================================================
+   TOOL REGISTRY (new class-based tools)
+===================================================== */
+
+const registry = new ToolRegistry();
+registry.register(
+  new WebSearchTool(),
+  new WebFetchTool(),
+  new DuckDuckGoSearchTool(),
+  new SendMessageTool(),
+);
+
+/* =====================================================
    TOOL DEFINITIONS (for OpenAI)
 ===================================================== */
 
-// notesTools / emailTools / notionTools / telegramTool use { name, description, input_schema }
-const rawTools = [...notesTools, telegramTool, ...emailTools, ...notionTools].map(
+// Legacy tools use { name, description, input_schema } — convert to OpenAI format
+const legacyTools = [...notesTools, ...emailTools, ...notionTools].map(
   (tool) => ({
     type: "function" as const,
     function: {
@@ -49,14 +68,14 @@ const rawTools = [...notesTools, telegramTool, ...emailTools, ...notionTools].ma
   }),
 );
 
-// memoryOpenAITools are already in OpenAI format { type, function: { name, description, parameters } }
-const openAITools = [...rawTools, ...memoryOpenAITools];
+// Merge: legacy tools + memory tools + registry-based tools (web, etc.)
+const openAITools = [...legacyTools, ...memoryOpenAITools, ...registry.toOpenAITools()];
 
 /* =====================================================
    PROMPTS
 ===================================================== */
 
-const BASE_SYSTEM_PROMPT = `You are a helpful AI assistant with note-taking, email, and memory capabilities.
+const BASE_SYSTEM_PROMPT = `You are a helpful AI assistant with note-taking, email, memory, and web search capabilities.
 
 MEMORY INSTRUCTIONS:
 - At the start of each conversation, search memory for relevant context about the user.
@@ -64,7 +83,14 @@ MEMORY INSTRUCTIONS:
 - When the user asks you to 'remember', 'forget', or 'recall' something, use the memory tools.
 - Always prefer to recall from memory before asking the user to repeat themselves.
 
-Use tools when needed. Be concise and helpful.`;
+WEB SEARCH INSTRUCTIONS:
+- When the user asks to search, look up, or find something online, or if you need to find something online, use web_search (Brave) or ddg_search (DuckDuckGo).
+- After getting search results, ALWAYS use web_fetch on the relevant URL(s) to read the full page content before answering.
+- Do NOT just return raw search result snippets. Fetch the actual pages, read them, and give a thorough, well-informed answer.
+- If fetching a page fails or is truncated, try another result URL.
+- You can call tools in multiple steps: first search, then fetch, then answer.
+
+Use tools when needed. Be concise and helpful. Multiple tools can be used in a single response.`;
 
 let mailSkillPrompt = "";
 
@@ -73,16 +99,6 @@ let mailSkillPrompt = "";
 ===================================================== */
 
 const conversationHistory: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [];
-
-/* =====================================================
-   CLI INTERFACE
-===================================================== */
-
-const rl = readline.createInterface({
-  input: process.stdin,
-  output: process.stdout,
-  prompt: "\n> ",
-});
 
 /* =====================================================
    TOOL ROUTER
@@ -99,17 +115,12 @@ async function executeTool(toolName: string, args: any): Promise<string> {
   if (emailTools.some((t) => t.name === toolName)) {
     const result = await executeEmailTool(toolName, args);
 
-    // notify only after sending
+    // notify via Telegram after sending
     if (toolName === "send_email") {
-      await sendTelegramMessage(result);
+      await telegram.sendMessage(result);
     }
 
     return result;
-  }
-
-  // Telegram tool
-  if (toolName === "send_telegram_message") {
-    return await sendTelegramMessage(args.message);
   }
 
   // Notes tools
@@ -120,6 +131,11 @@ async function executeTool(toolName: string, args: any): Promise<string> {
   // Notion tools
   if (notionTools.some((t) => t.name === toolName)) {
     return await executeNotionTool(toolName, args);
+  }
+
+  // Registry-based tools (web search, web fetch, etc.)
+  if (registry.has(toolName)) {
+    return await registry.execute(toolName, args);
   }
 
   throw new Error(`Unknown tool: ${toolName}`);
@@ -146,17 +162,17 @@ async function chatWithTools(
   const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] =
     isolated
       ? [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userInput },
-        ]
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userInput },
+      ]
       : [
-          { role: "system", content: systemPrompt },
-          ...conversationHistory,
-          { role: "user", content: userInput },
-        ];
+        { role: "system", content: systemPrompt },
+        ...conversationHistory,
+        { role: "user", content: userInput },
+      ];
 
   const response = await openai.chat.completions.create({
-    model: "openai/gpt-4o-mini",
+    model: "qwen/qwen3-235b-a22b-thinking-2507",
     messages,
     tools: openAITools,
     tool_choice: "auto",
@@ -175,18 +191,23 @@ async function chatWithTools(
     });
   }
 
-  /* ---------- Tool Calls ---------- */
+  /* ---------- Iterative Tool Loop (supports chaining, e.g. search → fetch) ---------- */
 
-  if (message.tool_calls) {
-    if (!isolated) conversationHistory.push(message);
+  const MAX_TOOL_ROUNDS = 10;
+  let currentMessage = message;
 
-    for (const call of message.tool_calls) {
+  for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+    if (!currentMessage.tool_calls) break;
+
+    if (!isolated) conversationHistory.push(currentMessage);
+
+    for (const call of currentMessage.tool_calls) {
       if (call.type !== "function") continue;
 
       const toolName = call.function.name;
       const args = JSON.parse(call.function.arguments);
 
-      console.log(`\n🔧 Using tool: ${toolName}`);
+      console.log(`\n🔧 [round ${round + 1}] Using tool: ${toolName}`);
 
       let result = "";
 
@@ -205,32 +226,39 @@ async function chatWithTools(
       }
     }
 
-    // final assistant response after tools
+    // Ask the LLM again — it may request more tools (e.g. fetch after search)
     const followUp = await openai.chat.completions.create({
-      model: "openai/gpt-4o-mini",
+      model: "qwen/qwen3-235b-a22b-thinking-2507",
       messages: isolated
         ? messages
         : [{ role: "system", content: systemPrompt }, ...conversationHistory],
+      tools: openAITools,
+      tool_choice: "auto",
     });
 
-    const finalMessage = followUp.choices[0].message.content || "";
+    currentMessage = followUp.choices[0].message;
 
-    console.log(`\n${finalMessage}`);
+    // If no more tool calls, this is the final text response
+    if (!currentMessage.tool_calls) {
+      const finalMessage = currentMessage.content || "";
 
-    if (!isolated) {
-      conversationHistory.push({
-        role: "assistant",
-        content: finalMessage,
-      });
+      console.log(`\n${finalMessage}`);
 
-      memory.addToShortTerm({
-        role: "assistant",
-        content: finalMessage,
-        timestamp: Date.now(),
-      });
+      if (!isolated) {
+        conversationHistory.push({
+          role: "assistant",
+          content: finalMessage,
+        });
+
+        memory.addToShortTerm({
+          role: "assistant",
+          content: finalMessage,
+          timestamp: Date.now(),
+        });
+      }
+
+      return finalMessage;
     }
-
-    return finalMessage;
   }
 
   /* ---------- Normal response ---------- */
@@ -271,7 +299,15 @@ Decide whether this is PRIORITY, NOTE, or IGNORE.
 Use tools when needed.
 `;
 
-  await chatWithTools(emailPrompt, true); // isolated run
+  // Enqueue to inbound queue — processed in isolated mode (no history)
+  inboundQueue.enqueue({
+    id: crypto.randomUUID(),
+    source: "email",
+    chatId: "email",
+    text: emailPrompt,
+    timestamp: Date.now(),
+    isolated: true,
+  });
 }
 
 /* =====================================================
@@ -313,59 +349,42 @@ async function main() {
 
   webhookServer.start();
 
-  console.log("➡️  Expose webhook with: ngrok http 3000");
-  console.log("🧠 Memory system active");
-  console.log("🤖 Agent Running...");
-  console.log("━".repeat(50));
+  /* ---------- Message Processor ---------- */
 
+  const processor = new MessageProcessor(chatWithTools);
+  processor.start();
+
+  console.log("➡️  Expose webhook with: ngrok http 3000");
   /* ---------- CLI ---------- */
 
-  rl.prompt();
+  const cli = new CLI();
 
-  rl.on("line", async (input) => {
-    const userInput = input.trim();
-
-    if (!userInput) return rl.prompt();
-
-    if (userInput.toLowerCase() === "exit") {
-      rl.close();
-      return;
-    }
-
-    // Debug command: show memory stats
-    if (userInput.toLowerCase() === "/memory") {
-      const stats = await memory.stats();
-      console.log("\n🧠 Memory stats:", JSON.stringify(stats, null, 2));
-      return rl.prompt();
-    }
-
-    try {
-      await chatWithTools(userInput);
-    } catch (err: any) {
-      console.error("❌ Error:", err.message);
-    }
-
-    rl.prompt();
+  cli.registerCommand("/memory", "Show memory stats", async () => {
+    const stats = await memory.stats();
+    console.log("\n🧠 Memory stats:", JSON.stringify(stats, null, 2));
   });
 
-  rl.on("close", async () => {
+  cli.onClose(async () => {
     console.log("\n💾 Flushing session to memory...");
     await memory.flushSession();
     console.log("👋 Goodbye!");
-    process.exit(0);
   });
+
+  cli.start();
 }
 
 /* =====================================================
-   TELEGRAM INPUT → AGENT
+   TELEGRAM INPUT → INBOUND QUEUE
 ===================================================== */
 
-bot.on("message", async (msg) => {
-  const text = msg.text;
-  if (!text) return;
-
-  const response = await chatWithTools(text);
-  await bot.sendMessage(msg.chat.id, response);
+telegram.onMessage(async (text, chatId) => {
+  inboundQueue.enqueue({
+    id: crypto.randomUUID(),
+    source: "telegram",
+    chatId: String(chatId),
+    text,
+    timestamp: Date.now(),
+  });
 });
 
 /* =====================================================
