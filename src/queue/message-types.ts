@@ -25,6 +25,9 @@ export interface InboundMessage {
 
     /** If true, the message should be processed in isolated mode (no history). */
     isolated?: boolean;
+
+    /** Which agent should handle this message (set by router or delegation). */
+    agentId?: string;
 }
 
 export interface OutboundMessage {
@@ -50,6 +53,9 @@ export interface ReplyContext {
 
     /** Chat ID to reply to. */
     chatId: string;
+
+    /** Which agent is currently processing. */
+    agentId: string;
 }
 
 /**
