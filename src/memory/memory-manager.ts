@@ -7,10 +7,12 @@
  *   - Index      : SQLite FTS5 full-text search over all memory files
  *   - Tools      : agent can read / write / search / forget memories
  *
- * Files on disk (all inside MEMORY_DIR, default: ./openpaw-memory/):
+ * Files on disk (all inside the configured memory directory):
  *   MEMORY.md               – curated long-term facts (append + overwrite)
  *   memory/YYYY-MM-DD.md    – append-only daily session logs
  *   memory.db               – SQLite FTS5 index (rebuilt from .md files)
+ *
+ * Each agent instantiates its own MemoryManager with an isolated directory.
  */
 
 import fs from "fs/promises";
@@ -42,18 +44,16 @@ export type ShortTermMessage = {
   timestamp: number;
 };
 
-// ─── Constants ────────────────────────────────────────────────────────────────
+export interface MemoryManagerConfig {
+  /** Root directory for this agent's memory files. */
+  dir: string;
 
-const MEMORY_DIR = process.env.OPENPAW_MEMORY_DIR
-  ? path.resolve(process.env.OPENPAW_MEMORY_DIR)
-  : path.join(process.cwd(), "openpaw-memory");
+  /** Sliding window size for short-term memory (default: 20). */
+  shortTermWindow?: number;
 
-const MEMORY_MD   = path.join(MEMORY_DIR, "MEMORY.md");
-const DAILY_DIR   = path.join(MEMORY_DIR, "memory");
-const DB_PATH     = path.join(MEMORY_DIR, "memory.db");
-
-const MAX_SHORT_TERM = parseInt(process.env.OPENPAW_SHORT_TERM_WINDOW ?? "20");
-const MAX_FACTS      = parseInt(process.env.OPENPAW_MAX_FACTS ?? "200");
+  /** Maximum entries in MEMORY.md (default: 200). */
+  maxFacts?: number;
+}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -132,18 +132,35 @@ export class MemoryManager {
   private dirty = false;
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
 
+  // Instance-level paths computed from config
+  private readonly memoryDir: string;
+  private readonly memoryMd: string;
+  private readonly dailyDir: string;
+  private readonly dbPath: string;
+  private readonly maxShortTerm: number;
+  private readonly maxFacts: number;
+
+  constructor(config: MemoryManagerConfig) {
+    this.memoryDir = path.resolve(config.dir);
+    this.memoryMd = path.join(this.memoryDir, "MEMORY.md");
+    this.dailyDir = path.join(this.memoryDir, "memory");
+    this.dbPath = path.join(this.memoryDir, "memory.db");
+    this.maxShortTerm = config.shortTermWindow ?? 20;
+    this.maxFacts = config.maxFacts ?? 200;
+  }
+
   // ── Init ──────────────────────────────────────────────────────────────────
 
   async init() {
-    await fs.mkdir(MEMORY_DIR, { recursive: true });
-    await fs.mkdir(DAILY_DIR, { recursive: true });
+    await fs.mkdir(this.memoryDir, { recursive: true });
+    await fs.mkdir(this.dailyDir, { recursive: true });
 
     // Ensure MEMORY.md exists
     try {
-      await fs.access(MEMORY_MD);
+      await fs.access(this.memoryMd);
     } catch {
       await fs.writeFile(
-        MEMORY_MD,
+        this.memoryMd,
         `# OpenPaw Long-Term Memory\n\nCreated: ${new Date().toISOString()}\n\n---\n`,
       );
     }
@@ -151,13 +168,13 @@ export class MemoryManager {
     this.initDb();
     await this.rebuildIndex();
 
-    console.log(`🧠 Memory initialized at ${MEMORY_DIR}`);
+    console.log(`🧠 Memory initialized at ${this.memoryDir}`);
   }
 
   // ── SQLite ────────────────────────────────────────────────────────────────
 
   private initDb() {
-    this.db = new Database(DB_PATH);
+    this.db = new Database(this.dbPath);
     this.db.pragma("journal_mode = WAL");
 
     this.db.exec(`
@@ -207,18 +224,18 @@ export class MemoryManager {
 
     // Long-term MEMORY.md
     try {
-      const raw = await fs.readFile(MEMORY_MD, "utf-8");
+      const raw = await fs.readFile(this.memoryMd, "utf-8");
       results.push(...parseMemoryMd(raw));
-    } catch {}
+    } catch { }
 
     // Daily logs
     try {
-      const files = await fs.readdir(DAILY_DIR);
+      const files = await fs.readdir(this.dailyDir);
       for (const file of files.filter((f) => f.endsWith(".md"))) {
-        const raw = await fs.readFile(path.join(DAILY_DIR, file), "utf-8");
+        const raw = await fs.readFile(path.join(this.dailyDir, file), "utf-8");
         results.push(...parseMemoryMd(raw));
       }
-    } catch {}
+    } catch { }
 
     return results;
   }
@@ -284,7 +301,7 @@ export class MemoryManager {
   }
 
   private async appendDailyLog(entry: MemoryEntry) {
-    const file = path.join(DAILY_DIR, `${today()}.md`);
+    const file = path.join(this.dailyDir, `${today()}.md`);
     const block = serializeEntry(entry);
     await fs.appendFile(file, block + "\n");
   }
@@ -292,8 +309,8 @@ export class MemoryManager {
   private async upsertLongTerm(entry: MemoryEntry) {
     let raw = "";
     try {
-      raw = await fs.readFile(MEMORY_MD, "utf-8");
-    } catch {}
+      raw = await fs.readFile(this.memoryMd, "utf-8");
+    } catch { }
 
     const entries = parseMemoryMd(raw);
     const idx = entries.findIndex((e) => e.id === entry.id);
@@ -304,14 +321,14 @@ export class MemoryManager {
       entries.push(entry);
     }
 
-    // Trim to MAX_FACTS (keep newest)
+    // Trim to maxFacts (keep newest)
     const trimmed = entries
       .sort((a, b) => a.updatedAt.localeCompare(b.updatedAt))
-      .slice(-MAX_FACTS);
+      .slice(-this.maxFacts);
 
     const header = `# OpenPaw Long-Term Memory\n\nLast updated: ${new Date().toISOString()}\n\n---\n`;
     const body = trimmed.map(serializeEntry).join("\n");
-    await fs.writeFile(MEMORY_MD, header + body);
+    await fs.writeFile(this.memoryMd, header + body);
   }
 
   // ── Delete ────────────────────────────────────────────────────────────────
@@ -319,7 +336,7 @@ export class MemoryManager {
   async forget(id: string): Promise<boolean> {
     let raw = "";
     try {
-      raw = await fs.readFile(MEMORY_MD, "utf-8");
+      raw = await fs.readFile(this.memoryMd, "utf-8");
     } catch {
       return false;
     }
@@ -330,7 +347,7 @@ export class MemoryManager {
     if (filtered.length === entries.length) return false;
 
     const header = `# OpenPaw Long-Term Memory\n\nLast updated: ${new Date().toISOString()}\n\n---\n`;
-    await fs.writeFile(MEMORY_MD, header + filtered.map(serializeEntry).join("\n"));
+    await fs.writeFile(this.memoryMd, header + filtered.map(serializeEntry).join("\n"));
     this.db.prepare("DELETE FROM memory_fts WHERE id = ?").run(id);
     return true;
   }
@@ -397,7 +414,7 @@ export class MemoryManager {
 
   addToShortTerm(msg: ShortTermMessage) {
     this.shortTerm.push(msg);
-    if (this.shortTerm.length > MAX_SHORT_TERM) {
+    if (this.shortTerm.length > this.maxShortTerm) {
       this.shortTerm.shift();
     }
   }
@@ -503,11 +520,7 @@ export class MemoryManager {
       totalEntries: entries.length,
       shortTermLength: this.shortTerm.length,
       byType,
-      memoryDir: MEMORY_DIR,
+      memoryDir: this.memoryDir,
     };
   }
 }
-
-// ─── Singleton ────────────────────────────────────────────────────────────────
-
-export const memory = new MemoryManager();

@@ -25,7 +25,8 @@ import { getLatestEmailSnippet } from "./tools/gmail-webhook";
 import { notionTools, executeNotionTool } from "./tools/notion";
 
 // ✨ Memory
-import { memory } from "./memory/memory-manager";
+import { MemoryManager } from "./memory/memory-manager";
+const memory = new MemoryManager({ dir: "./openpaw-memory" });
 import {
   memoryOpenAITools,
   executeMemoryTool,
@@ -59,13 +60,13 @@ const openAITools = [
   "function" in tool
     ? tool
     : {
-        type: "function" as const,
-        function: {
-          name: (tool as any).name,
-          description: (tool as any).description,
-          parameters: (tool as any).input_schema,
-        },
+      type: "function" as const,
+      function: {
+        name: (tool as any).name,
+        description: (tool as any).description,
+        parameters: (tool as any).input_schema,
       },
+    },
 );
 
 /* PROMPTS */
@@ -91,7 +92,7 @@ const conversationHistory: OpenAI.Chat.Completions.ChatCompletionMessageParam[] 
 async function executeTool(toolName: string, args: any): Promise<string> {
   // ✨ Memory tools
   if (memoryTools.some((t) => t.name === toolName)) {
-    return await executeMemoryTool(toolName, args);
+    return await executeMemoryTool(memory, toolName, args);
   }
 
   // Email tools
@@ -137,14 +138,14 @@ async function chatWithTools(
   const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] =
     isolated
       ? [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userInput },
-        ]
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userInput },
+      ]
       : [
-          { role: "system", content: systemPrompt },
-          ...conversationHistory,
-          { role: "user", content: userInput },
-        ];
+        { role: "system", content: systemPrompt },
+        ...conversationHistory,
+        { role: "user", content: userInput },
+      ];
 
   const response = await openai.chat.completions.create({
     model: "openai/gpt-4o-mini",
@@ -200,9 +201,9 @@ async function chatWithTools(
       messages: isolated
         ? messages
         : [
-            { role: "system", content: systemPrompt },
-            ...conversationHistory,
-          ],
+          { role: "system", content: systemPrompt },
+          ...conversationHistory,
+        ],
     });
 
     const finalMessage = followUp.choices[0].message.content || "";
