@@ -1,28 +1,25 @@
 import "dotenv/config";
 import OpenAI from "openai";
-import fs from "fs/promises";
-import path from "path";
-
-import { notesTools, executeNotesTool } from "./tools/notes";
-import { emailTools, executeEmailTool } from "./tools/email";
-
-import { WebhookServer } from "./server/webhook-server";
-import { getLatestEmailSnippet } from "./tools/gmail-webhook";
-import { notionTools, executeNotionTool } from "./tools/notion";
+import crypto from "crypto";
 
 import { ToolRegistry } from "./tools/tool-registry";
 import { WebSearchTool, WebFetchTool, DuckDuckGoSearchTool } from "./tools/web";
 import { SendMessageTool } from "./tools/message";
-import { TelegramChannel } from "./channel/telegram";
+import { DelegateToAgentTool } from "./tools/delegate";
 
+import { TelegramChannel } from "./channel/telegram";
 import { channelRegistry } from "./channel/channel-registry";
 import { inboundQueue } from "./queue/message-queue";
 import { MessageProcessor } from "./queue/message-processor";
 import { CLI } from "./cli/cli";
-import crypto from "crypto";
 
-import { memory } from "./memory/memory-manager";
-import { memoryOpenAITools, executeMemoryTool, memoryTools } from "./memory/memory-tools";
+import { WebhookServer } from "./server/webhook-server";
+import { getLatestEmailSnippet } from "./tools/gmail-webhook";
+
+import { Agent } from "./agents/agent";
+import { AgentRegistry } from "./agents/agent-registry";
+import { Router } from "./agents/router";
+import { agentConfigs, routerRules, defaultAgentId } from "./agents.config";
 
 /* =====================================================
    TELEGRAM CHANNEL
@@ -41,11 +38,11 @@ const openai = new OpenAI({
 });
 
 /* =====================================================
-   TOOL REGISTRY (new class-based tools)
+   TOOL REGISTRY (global — tools register here, agents filter at call time)
 ===================================================== */
 
-const registry = new ToolRegistry();
-registry.register(
+const toolRegistry = new ToolRegistry();
+toolRegistry.register(
   new WebSearchTool(),
   new WebFetchTool(),
   new DuckDuckGoSearchTool(),
@@ -53,241 +50,29 @@ registry.register(
 );
 
 /* =====================================================
-   TOOL DEFINITIONS (for OpenAI)
+   AGENT REGISTRY
 ===================================================== */
 
-// Legacy tools use { name, description, input_schema } — convert to OpenAI format
-const legacyTools = [...notesTools, ...emailTools, ...notionTools].map(
-  (tool) => ({
-    type: "function" as const,
-    function: {
-      name: tool.name,
-      description: tool.description,
-      parameters: tool.input_schema,
-    },
-  }),
-);
-
-// Merge: legacy tools + memory tools + registry-based tools (web, etc.)
-const openAITools = [...legacyTools, ...memoryOpenAITools, ...registry.toOpenAITools()];
+const agentRegistry = new AgentRegistry();
 
 /* =====================================================
-   PROMPTS
+   DELEGATE TOOL — needs the agent registry ref
 ===================================================== */
 
-const BASE_SYSTEM_PROMPT = `You are a helpful AI assistant with note-taking, email, memory, and web search capabilities.
-
-MEMORY INSTRUCTIONS:
-- At the start of each conversation, search memory for relevant context about the user.
-- After learning any important fact about the user (name, preference, goal, project), save it with memory_save.
-- When the user asks you to 'remember', 'forget', or 'recall' something, use the memory tools.
-- Always prefer to recall from memory before asking the user to repeat themselves.
-
-WEB SEARCH INSTRUCTIONS:
-- When the user asks to search, look up, or find something online, or if you need to find something online, use web_search (Brave) or ddg_search (DuckDuckGo).
-- After getting search results, ALWAYS use web_fetch on the relevant URL(s) to read the full page content before answering.
-- Do NOT just return raw search result snippets. Fetch the actual pages, read them, and give a thorough, well-informed answer.
-- If fetching a page fails or is truncated, try another result URL.
-- You can call tools in multiple steps: first search, then fetch, then answer.
-
-Use tools when needed. Be concise and helpful. Multiple tools can be used in a single response.`;
-
-let mailSkillPrompt = "";
+const delegateTool = new DelegateToAgentTool(agentRegistry);
+toolRegistry.register(delegateTool);
 
 /* =====================================================
-   CHAT HISTORY (only for human conversations)
+   ROUTER
 ===================================================== */
 
-const conversationHistory: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [];
-
-/* =====================================================
-   TOOL ROUTER
-   Decides which executor handles each tool
-===================================================== */
-
-async function executeTool(toolName: string, args: any): Promise<string> {
-  // Memory tools
-  if (memoryTools.some((t) => t.name === toolName)) {
-    return await executeMemoryTool(toolName, args);
-  }
-
-  // Email tools
-  if (emailTools.some((t) => t.name === toolName)) {
-    const result = await executeEmailTool(toolName, args);
-
-    // notify via Telegram after sending
-    if (toolName === "send_email") {
-      await telegram.sendMessage(result);
-    }
-
-    return result;
-  }
-
-  // Notes tools
-  if (notesTools.some((t) => t.name === toolName)) {
-    return await executeNotesTool(toolName, args);
-  }
-
-  // Notion tools
-  if (notionTools.some((t) => t.name === toolName)) {
-    return await executeNotionTool(toolName, args);
-  }
-
-  // Registry-based tools (web search, web fetch, etc.)
-  if (registry.has(toolName)) {
-    return await registry.execute(toolName, args);
-  }
-
-  throw new Error(`Unknown tool: ${toolName}`);
-}
-
-/* =====================================================
-   CORE AGENT LOOP
-===================================================== */
-
-async function chatWithTools(
-  userInput: string,
-  isolated = false
-): Promise<string> {
-  // Build memory context block for this query (skip for isolated email runs)
-  const memoryContext = isolated
-    ? ""
-    : await memory.buildContextBlock(userInput);
-
-  const systemPrompt = isolated
-    ? mailSkillPrompt
-    : BASE_SYSTEM_PROMPT + memoryContext;
-
-  // isolated runs = email events (no history)
-  const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] =
-    isolated
-      ? [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userInput },
-      ]
-      : [
-        { role: "system", content: systemPrompt },
-        ...conversationHistory,
-        { role: "user", content: userInput },
-      ];
-
-  const response = await openai.chat.completions.create({
-    model: "qwen/qwen3-235b-a22b-thinking-2507",
-    messages,
-    tools: openAITools,
-    tool_choice: "auto",
-  });
-
-  const message = response.choices[0].message;
-
-  if (!isolated) {
-    conversationHistory.push({ role: "user", content: userInput });
-
-    // Track in short-term memory
-    memory.addToShortTerm({
-      role: "user",
-      content: userInput,
-      timestamp: Date.now(),
-    });
-  }
-
-  /* ---------- Iterative Tool Loop (supports chaining, e.g. search → fetch) ---------- */
-
-  const MAX_TOOL_ROUNDS = 10;
-  let currentMessage = message;
-
-  for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-    if (!currentMessage.tool_calls) break;
-
-    if (!isolated) conversationHistory.push(currentMessage);
-
-    for (const call of currentMessage.tool_calls) {
-      if (call.type !== "function") continue;
-
-      const toolName = call.function.name;
-      const args = JSON.parse(call.function.arguments);
-
-      console.log(`\n🔧 [round ${round + 1}] Using tool: ${toolName}`);
-
-      let result = "";
-
-      try {
-        result = await executeTool(toolName, args);
-      } catch (err: any) {
-        result = `Tool error: ${err.message}`;
-      }
-
-      if (!isolated) {
-        conversationHistory.push({
-          role: "tool",
-          tool_call_id: call.id,
-          content: result,
-        });
-      }
-    }
-
-    // Ask the LLM again — it may request more tools (e.g. fetch after search)
-    const followUp = await openai.chat.completions.create({
-      model: "qwen/qwen3-235b-a22b-thinking-2507",
-      messages: isolated
-        ? messages
-        : [{ role: "system", content: systemPrompt }, ...conversationHistory],
-      tools: openAITools,
-      tool_choice: "auto",
-    });
-
-    currentMessage = followUp.choices[0].message;
-
-    // If no more tool calls, this is the final text response
-    if (!currentMessage.tool_calls) {
-      const finalMessage = currentMessage.content || "";
-
-      console.log(`\n${finalMessage}`);
-
-      if (!isolated) {
-        conversationHistory.push({
-          role: "assistant",
-          content: finalMessage,
-        });
-
-        memory.addToShortTerm({
-          role: "assistant",
-          content: finalMessage,
-          timestamp: Date.now(),
-        });
-      }
-
-      return finalMessage;
-    }
-  }
-
-  /* ---------- Normal response ---------- */
-
-  const content = message.content || "";
-
-  console.log(`\n${content}`);
-
-  if (!isolated) {
-    conversationHistory.push({
-      role: "assistant",
-      content,
-    });
-
-    memory.addToShortTerm({
-      role: "assistant",
-      content,
-      timestamp: Date.now(),
-    });
-  }
-
-  return content;
-}
+const router = new Router(routerRules, defaultAgentId);
 
 /* =====================================================
    EMAIL EVENT PROCESSOR
 ===================================================== */
 
-async function processEmailEvent(email: any) {
+function processEmailEvent(email: any) {
   const emailPrompt = `
 New email received:
 
@@ -299,7 +84,7 @@ Decide whether this is PRIORITY, NOTE, or IGNORE.
 Use tools when needed.
 `;
 
-  // Enqueue to inbound queue — processed in isolated mode (no history)
+  // Enqueue to inbound queue — router will send it to email-manager
   inboundQueue.enqueue({
     id: crypto.randomUUID(),
     source: "email",
@@ -315,14 +100,16 @@ Use tools when needed.
 ===================================================== */
 
 async function main() {
-  // Init memory first
-  await memory.init();
+  // Initialize all agents from config
+  console.log("\n🚀 Initializing OpenPaw Multi-Agent System...\n");
 
-  // load email skill prompt
-  mailSkillPrompt = await fs.readFile(
-    path.join(process.cwd(), "src", "skills", "mail.md"),
-    "utf-8"
-  );
+  for (const config of agentConfigs) {
+    const agent = new Agent(config, openai, toolRegistry);
+    await agent.init();
+    agentRegistry.register(agent);
+  }
+
+  console.log(`\n✅ ${agentConfigs.length} agents initialized: ${agentRegistry.list().join(", ")}\n`);
 
   /* ---------- Webhook Server ---------- */
 
@@ -344,29 +131,56 @@ async function main() {
     console.log(`Subject: ${email.subject}`);
     console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
 
-    await processEmailEvent(email);
+    processEmailEvent(email);
   });
 
   webhookServer.start();
 
   /* ---------- Message Processor ---------- */
 
-  const processor = new MessageProcessor(chatWithTools);
+  const processor = new MessageProcessor(agentRegistry, router);
   processor.start();
 
   console.log("➡️  Expose webhook with: ngrok http 3000");
+
   /* ---------- CLI ---------- */
 
   const cli = new CLI();
 
-  cli.registerCommand("/memory", "Show memory stats", async () => {
-    const stats = await memory.stats();
-    console.log("\n🧠 Memory stats:", JSON.stringify(stats, null, 2));
+  cli.registerCommand("/memory", "Show memory stats (usage: /memory [agentId])", async (args?: string) => {
+    const agentId = args?.trim() || defaultAgentId;
+    const agent = agentRegistry.get(agentId);
+
+    if (!agent) {
+      console.log(`\n❌ Agent "${agentId}" not found. Available: ${agentRegistry.list().join(", ")}`);
+      return;
+    }
+
+    const stats = await agent.memory.stats();
+    console.log(`\n🧠 Memory stats for agent "${agentId}":\n`, JSON.stringify(stats, null, 2));
+  });
+
+  cli.registerCommand("/agents", "List all registered agents", () => {
+    console.log("\n🤖 Registered Agents:");
+    console.log("━".repeat(60));
+
+    for (const agent of agentRegistry.getAll()) {
+      const c = agent.config;
+      console.log(`  ${c.id.padEnd(18)} ${c.name.padEnd(22)} ${c.tools.length} tools  ${c.isolated ? "(isolated)" : ""}`);
+    }
+
+    console.log("━".repeat(60));
   });
 
   cli.onClose(async () => {
-    console.log("\n💾 Flushing session to memory...");
-    await memory.flushSession();
+    console.log("\n💾 Flushing all agent sessions to memory...");
+    for (const agent of agentRegistry.getAll()) {
+      try {
+        await agent.memory.flushSession();
+      } catch (err: any) {
+        console.error(`⚠️  Failed to flush agent "${agent.config.id}":`, err.message);
+      }
+    }
     console.log("👋 Goodbye!");
   });
 

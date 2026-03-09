@@ -3,10 +3,12 @@
  *
  * Exposes memory operations as OpenAI-compatible function tools so the agent
  * can read, write, search, and forget memories autonomously.
+ *
+ * The executor accepts a MemoryManager instance so each agent operates
+ * on its own isolated memory store.
  */
 
-import { memory } from "./memory-manager";
-import type { MemoryEntry } from "./memory-manager";
+import type { MemoryManager, MemoryEntry } from "./memory-manager";
 
 // ─── Tool Definitions (OpenAI schema) ────────────────────────────────────────
 
@@ -118,6 +120,7 @@ export const memoryTools = [
 // ─── Tool Executor ────────────────────────────────────────────────────────────
 
 export async function executeMemoryTool(
+  memory: MemoryManager,
   toolName: string,
   args: Record<string, any>,
 ): Promise<string> {

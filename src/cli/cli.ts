@@ -11,10 +11,11 @@ import { channelRegistry } from "../channel/channel-registry";
  *   - Handle user input via readline
  *   - Route non-command input to the inbound message queue
  *   - Provide built-in commands (/help, /status, /quit, /clear)
- *   - Support externally registered commands (e.g. /memory from index.ts)
+ *   - Support externally registered commands (e.g. /memory, /agents from index.ts)
+ *   - Commands can accept arguments (e.g. /memory personal)
  */
 
-type CommandHandler = () => Promise<void> | void;
+type CommandHandler = (args?: string) => Promise<void> | void;
 
 interface CommandEntry {
     handler: CommandHandler;
@@ -93,6 +94,7 @@ export class CLI {
      * @param command   The command trigger (e.g. "/memory"). Include the leading slash.
      * @param description   A short description shown in /help.
      * @param handler   The function to execute when the command is triggered.
+     *                  Receives optional arguments string (everything after the command name).
      */
     registerCommand(command: string, description: string, handler: CommandHandler): void {
         this.commands.set(command.toLowerCase(), { handler, description });
@@ -111,7 +113,7 @@ export class CLI {
     private showBanner(): void {
         console.log("");
         console.log("╔══════════════════════════════════════════╗");
-        console.log("║           🐾 OpenPaw Agent               ║");
+        console.log("║       🐾 OpenPaw Multi-Agent System     ║");
         console.log("╠══════════════════════════════════════════╣");
         console.log("║  Type a message to chat with the agent   ║");
         console.log("║  Type /help to see available commands    ║");
@@ -135,11 +137,20 @@ export class CLI {
 
             // Check registered commands (starts with /)
             if (userInput.startsWith("/")) {
-                const cmd = this.commands.get(userInput.toLowerCase());
+                // Parse command and arguments
+                const spaceIdx = userInput.indexOf(" ");
+                const cmdName = spaceIdx === -1
+                    ? userInput.toLowerCase()
+                    : userInput.substring(0, spaceIdx).toLowerCase();
+                const cmdArgs = spaceIdx === -1
+                    ? undefined
+                    : userInput.substring(spaceIdx + 1).trim() || undefined;
+
+                const cmd = this.commands.get(cmdName);
                 if (cmd) {
-                    await cmd.handler();
+                    await cmd.handler(cmdArgs);
                 } else {
-                    console.log(`\n❌ Unknown command: ${userInput}. Type /help to see available commands.`);
+                    console.log(`\n❌ Unknown command: ${cmdName}. Type /help to see available commands.`);
                 }
                 return this.rl.prompt();
             }

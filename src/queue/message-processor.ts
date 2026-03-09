@@ -2,7 +2,8 @@
  * MessageProcessor — central processing loop for the queue-based architecture.
  *
  * Runs two independent loops:
- *   - Inbound loop:  dequeues messages, sets reply context, runs the agent,
+ *   - Inbound loop:  dequeues messages, resolves the target agent via the
+ *                     Router, sets reply context, runs the agent's chat(),
  *                     enqueues the response to the outbound queue.
  *   - Outbound loop: independently polls the outbound queue and delivers
  *                     messages to the correct channel via the registry.
@@ -18,16 +19,18 @@ import { setReplyContext } from "./message-types";
 import { channelRegistry } from "../channel/channel-registry";
 import { mdToText } from "../cli/markdown";
 
-/** The agent handler signature: takes user text, returns agent response. */
-type AgentHandler = (text: string, isolated?: boolean) => Promise<string>;
+import type { AgentRegistry } from "../agents/agent-registry";
+import type { Router } from "../agents/router";
 
 export class MessageProcessor {
-    private handler: AgentHandler;
+    private agentRegistry: AgentRegistry;
+    private router: Router;
     private running = false;
     private pollIntervalMs: number;
 
-    constructor(handler: AgentHandler, pollIntervalMs = 100) {
-        this.handler = handler;
+    constructor(agentRegistry: AgentRegistry, router: Router, pollIntervalMs = 100) {
+        this.agentRegistry = agentRegistry;
+        this.router = router;
         this.pollIntervalMs = pollIntervalMs;
     }
 
@@ -63,13 +66,29 @@ export class MessageProcessor {
         const msg = inboundQueue.dequeue();
         if (!msg) return;
 
-        console.log(`\n📨 Processing [${msg.source}] ${msg.text.substring(0, 60)}...`);
+        // Resolve which agent should handle this message
+        const agentId = this.router.resolve(msg);
+        const agent = this.agentRegistry.get(agentId);
+
+        if (!agent) {
+            console.error(`❌ No agent registered for "${agentId}"`);
+            outboundQueue.enqueue({
+                id: crypto.randomUUID(),
+                target: msg.source,
+                chatId: msg.chatId,
+                text: `❌ No agent found for "${agentId}"`,
+                timestamp: Date.now(),
+            });
+            return;
+        }
+
+        console.log(`\n📨 Processing [${msg.source}] → agent "${agentId}": ${msg.text.substring(0, 60)}...`);
 
         // Set reply context so tools know where to send replies
-        setReplyContext({ source: msg.source, chatId: msg.chatId });
+        setReplyContext({ source: msg.source, chatId: msg.chatId, agentId });
 
         try {
-            const response = await this.handler(msg.text, msg.isolated);
+            const response = await agent.chat(msg.text, msg.isolated);
 
             // Enqueue the agent's response back to the originating channel
             if (response && msg.source !== "email") {
@@ -82,7 +101,7 @@ export class MessageProcessor {
                 });
             }
         } catch (err: any) {
-            console.error(`❌ Processor error [${msg.source}]:`, err.message);
+            console.error(`❌ Processor error [${msg.source}] agent "${agentId}":`, err.message);
 
             outboundQueue.enqueue({
                 id: crypto.randomUUID(),

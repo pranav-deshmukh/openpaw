@@ -65,9 +65,45 @@ In CLI mode, type `/memory` to see live stats:
 4. **On exit** – `flushSession()` writes a summary log entry for the session
 5. **MEMORY.md edits** – You can manually edit `MEMORY.md` and the index will rebuild on next start
 
-## Scalability Notes
+## Multi-Agent Architecture
 
-- SQLite FTS5 handles hundreds of thousands of entries without issue
-- `MEMORY.md` is capped at `MAX_FACTS` (default 200) entries; oldest are trimmed
-- Daily logs are append-only and never trimmed — archive manually if needed
-- For very large deployments, swap the SQLite FTS layer for a vector DB (Chroma, Qdrant, pgvector)
+OpenPaw features a flexible multi-agent architecture that allows for isolated "identities" to coexist within the same process. Each agent has its own configuration, personality (Skill), memory store, and conversation history.
+
+### Core Components
+
+- **`Agent`**: The core execution unit. Keeps track of its own conversation history and manages its own `MemoryManager` instance.
+- **`AgentRegistry`**: A central registry where all instantiated agents are stored and retrieved by their unique ID (e.g., `personal`, `researcher`).
+- **`Router`**: Determines which agent should handle an incoming message based on configurable `RouterRule`s (source channel, chatId).
+- **`AgentConfig`**: A structured definition for each agent, specifying the LLM model, skill file (system prompt), allowed tools, and memory settings.
+
+### How It Works
+
+1.  **Incoming Message**: A message arrives from Telegram, CLI, or an Email Webhook.
+2.  **Routing**: The `Router` matches the message metadata against its rules to find the correct `agentId`.
+3.  **Dispatching**: The `MessageProcessor` retrieves the corresponding `Agent` from the `AgentRegistry`.
+4.  **Execution**: The agent runs its own chat loop, including up to 10 rounds of iterative tool calling. It uses its isolated memory and conversation history.
+5.  **Response**: The agent's response is enqueued in the `OutboundQueue` for delivery back to the originating channel.
+
+### Agent Delegation
+
+Agents can hand off specialized work to each other using the `delegate_to_agent` tool. For example, the `personal` agent can delegate a complex research task to the `researcher` agent.
+
+- **Synchronous Delegation**: The calling agent waits for the target agent to finish and receives the result as a tool output.
+- **Asynchronous Delegation**: The calling agent continues immediately; the target agent processes the task independently.
+
+### Isolated Memory
+
+Each agent maintains its own isolated memory directory:
+
+```
+openpaw-memory/
+├── personal/          ← Personal assistant facts & logs
+├── researcher/        ← Researcher-specific data (if any)
+└── email-manager/     ← Isolated email processing context
+```
+
+This ensures that different agents don't leak context to each other unless explicitly shared via delegation or tool outputs.
+
+### Adding New Agents
+
+New agents are defined in `src/agents.config.ts`. Simply add a new `AgentConfig` object to the `agentConfigs` array and define matching routing rules in `routerRules`.
