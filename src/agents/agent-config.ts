@@ -40,4 +40,13 @@ export interface AgentConfig {
    * Every invocation is isolated (like the email agent).
    */
   isolated: boolean;
+
+  /** Optional heartbeat configuration for this agent. */
+  heartbeat?: {
+    enabled: boolean;
+    intervalMs: number;
+    activeHoursStart?: number;  // 0-23, only fire during these hours
+    activeHoursEnd?: number;    // 0-23
+    timezone?: string;
+  };
 }
