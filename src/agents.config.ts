@@ -1,37 +1,25 @@
 /**
  * Agent configurations and routing rules for OpenPaw.
- *
- * Define all agents and their properties here.
- * To add a new agent, simply add an entry to `agentConfigs`.
- * To change routing, modify `routerRules`.
  */
 
 import type { AgentConfig } from "./agents/agent-config";
 import type { RouterRule } from "./agents/router";
 
-// ── Agent Definitions ────────────────────────────────────────────────────────
-
 export const agentConfigs: AgentConfig[] = [
     {
         id: "personal",
         name: "Personal Assistant",
-        model: "qwen/qwen3-235b-a22b-thinking-2507",
+        model: "z-ai/glm-4.5-air:free",
         skillFile: "src/skills/personal.md",
         tools: [
-            // Notes
             "add_note", "search_notes", "list_notes", "clear_all_notes",
-            // Email
             "create_email_draft", "show_email_draft", "send_email",
-            // Notion
             "notion_add_item",
-            // Memory
             "memory_save", "memory_search", "memory_list", "memory_forget", "memory_stats",
-            // Web
             "web_search", "ddg_search", "web_fetch",
-            // Messaging
             "send_message",
-            // Delegation
             "delegate_to_agent",
+            "schedule_at", "schedule_every", "schedule_cron", "schedule_list", "schedule_delete",
         ],
         memory: {
             dir: "./openpaw-memory/personal",
@@ -39,12 +27,19 @@ export const agentConfigs: AgentConfig[] = [
             maxFacts: 200,
         },
         isolated: false,
+        heartbeat: {
+            enabled: true,
+            intervalMs: 30 * 60 * 1000,
+            activeHoursStart: 8,
+            activeHoursEnd: 22,
+            timezone: "Asia/Kolkata",
+        },
     },
 
     {
         id: "email-manager",
         name: "Email Manager",
-        model: "qwen/qwen3-235b-a22b-thinking-2507",
+        model: "z-ai/glm-4.5-air:free",
         skillFile: "src/skills/mail.md",
         tools: [
             "send_message",
@@ -62,7 +57,7 @@ export const agentConfigs: AgentConfig[] = [
     {
         id: "researcher",
         name: "Researcher",
-        model: "qwen/qwen3-235b-a22b-thinking-2507",
+        model: "z-ai/glm-4.5-air:free",
         skillFile: "src/skills/researcher.md",
         tools: [
             "web_search",
@@ -79,13 +74,10 @@ export const agentConfigs: AgentConfig[] = [
     },
 ];
 
-// ── Routing Rules ────────────────────────────────────────────────────────────
-
 export const routerRules: RouterRule[] = [
     { source: "email", agentId: "email-manager" },
-    { source: "*", agentId: "personal" },     // default fallback
+    { source: "scheduler", agentId: "personal" },
+    { source: "*", agentId: "personal" },
 ];
-
-// ── Default Agent ────────────────────────────────────────────────────────────
 
 export const defaultAgentId = "personal";

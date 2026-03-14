@@ -28,6 +28,9 @@ export interface InboundMessage {
 
     /** Which agent should handle this message (set by router or delegation). */
     agentId?: string;
+
+    /** If true, suppress output when agent replies HEARTBEAT_OK. */
+    isHeartbeat?: boolean;
 }
 
 export interface OutboundMessage {

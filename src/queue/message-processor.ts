@@ -18,6 +18,7 @@ import { inboundQueue, outboundQueue } from "./message-queue";
 import { setReplyContext } from "./message-types";
 import { channelRegistry } from "../channel/channel-registry";
 import { mdToText } from "../cli/markdown";
+import { isHeartbeatOk } from "../scheduler/heartbeat";
 
 import type { AgentRegistry } from "../agents/agent-registry";
 import type { Router } from "../agents/router";
@@ -82,16 +83,25 @@ export class MessageProcessor {
             return;
         }
 
-        console.log(`\n📨 Processing [${msg.source}] → agent "${agentId}": ${msg.text.substring(0, 60)}...`);
+        const preview = msg.text ? msg.text.substring(0, 60) : "(no message)";
+        console.log(`\n📨 Processing [${msg.source}] → agent "${agentId}": ${preview}...`);
 
         // Set reply context so tools know where to send replies
         setReplyContext({ source: msg.source, chatId: msg.chatId, agentId });
 
         try {
-            const response = await agent.chat(msg.text, msg.isolated);
+            const response = await agent.chat(msg.text ?? "[No message provided]", msg.isolated);
+
+            // Heartbeat: if agent says nothing to report, drop silently
+            if (msg.isHeartbeat && isHeartbeatOk(response)) {
+                console.log(`💓 [${agentId}] Heartbeat OK — nothing to report.`);
+                setReplyContext(null);
+                return;
+            }
 
             // Enqueue the agent's response back to the originating channel
-            if (response && msg.source !== "email") {
+            // Skip for email (no reply channel) and scheduler (agent uses send_message tool instead)
+            if (response && msg.source !== "email" && msg.source !== "scheduler") {
                 outboundQueue.enqueue({
                     id: crypto.randomUUID(),
                     target: msg.source,
