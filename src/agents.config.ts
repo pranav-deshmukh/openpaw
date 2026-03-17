@@ -9,7 +9,7 @@ export const agentConfigs: AgentConfig[] = [
     {
         id: "personal",
         name: "Personal Assistant",
-        model: "z-ai/glm-4.5-air:free",
+        model: "nvidia/nemotron-3-super-120b-a12b:free",
         skillFile: "src/skills/personal.md",
         tools: [
             "add_note", "search_notes", "list_notes", "clear_all_notes",
@@ -39,7 +39,7 @@ export const agentConfigs: AgentConfig[] = [
     {
         id: "email-manager",
         name: "Email Manager",
-        model: "z-ai/glm-4.5-air:free",
+        model: "nvidia/nemotron-3-super-120b-a12b:free",
         skillFile: "src/skills/mail.md",
         tools: [
             "send_message",
@@ -57,7 +57,7 @@ export const agentConfigs: AgentConfig[] = [
     {
         id: "researcher",
         name: "Researcher",
-        model: "z-ai/glm-4.5-air:free",
+        model: "nvidia/nemotron-3-super-120b-a12b:free",
         skillFile: "src/skills/researcher.md",
         tools: [
             "web_search",

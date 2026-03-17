@@ -24,6 +24,27 @@ import { notesTools, executeNotesTool } from "../tools/notes";
 import { emailTools, executeEmailTool } from "../tools/email";
 import { notionTools, executeNotionTool } from "../tools/notion";
 
+// ─── Retry helper ─────────────────────────────────────────────────────────────
+
+async function withRetry<T>(fn: () => Promise<T>, maxRetries = 4, baseDelayMs = 2000): Promise<T> {
+    let lastErr: any;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        try {
+            return await fn();
+        } catch (err: any) {
+            lastErr = err;
+            const is429 = err?.status === 429 || String(err?.message).includes("429") || String(err?.message).toLowerCase().includes("rate limit");
+            if (!is429 || attempt === maxRetries) throw err;
+            const delay = baseDelayMs * Math.pow(2, attempt);
+            console.log(`⏳ Rate limited. Retrying in ${delay / 1000}s... (attempt ${attempt + 1}/${maxRetries})`);
+            await new Promise((r) => setTimeout(r, delay));
+        }
+    }
+    throw lastErr;
+}
+
+
+
 // ─── Agent ────────────────────────────────────────────────────────────────────
 
 export class Agent {
@@ -186,12 +207,12 @@ export class Agent {
                 { role: "user", content: userInput },
             ];
 
-        const response = await this.openai.chat.completions.create({
+        const response = await withRetry<OpenAI.Chat.Completions.ChatCompletion>(() => this.openai.chat.completions.create({
             model: this.config.model,
             messages,
             tools: this.agentTools.length > 0 ? this.agentTools : undefined,
             tool_choice: this.agentTools.length > 0 ? "auto" : undefined,
-        });
+        }));
 
         const message = response.choices[0].message;
 
@@ -242,14 +263,14 @@ export class Agent {
             }
 
             // Ask the LLM again — it may request more tools (e.g. fetch after search)
-            const followUp = await this.openai.chat.completions.create({
+            const followUp = await withRetry<OpenAI.Chat.Completions.ChatCompletion>(() => this.openai.chat.completions.create({
                 model: this.config.model,
                 messages: isIsolated
                     ? messages
                     : [{ role: "system", content: systemPrompt }, ...this.conversationHistory],
                 tools: this.agentTools.length > 0 ? this.agentTools : undefined,
                 tool_choice: this.agentTools.length > 0 ? "auto" : undefined,
-            });
+            }));
 
             currentMessage = followUp.choices[0].message;
 

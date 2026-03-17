@@ -3,31 +3,20 @@ import { outboundQueue } from "../queue/message-queue";
 import { getReplyContext } from "../queue/message-types";
 import crypto from "crypto";
 
-/**
- * SendMessageTool — stateless, queue-based tool for the LLM to send messages.
- *
- * Instead of holding channel references, it reads the current reply context
- * (set by the MessageProcessor) and enqueues an OutboundMessage.
- * The processor then delivers it to the correct channel.
- *
- * The LLM only needs to provide `{ message: "..." }` — routing is automatic.
- *
- * Usage:
- *   const tool = new SendMessageTool();   // no args needed
- *   registry.register(tool);
- */
 export class SendMessageTool extends BaseTool {
     readonly name = "send_message";
 
     readonly description =
-        "Send a message to notify the user through the current channel (e.g. Telegram, WhatsApp). Use this for important alerts, reminders, or when the user asks to be notified.";
+        "Send a message to the user via Telegram. " +
+        "Use this for reminders, alerts, and notifications — especially when triggered by scheduled jobs. " +
+        "When a scheduler job fires, ALWAYS use this tool to deliver the message to the user. Do NOT ask questions.";
 
     readonly parameters: ToolParametersSchema = {
         type: "object",
         properties: {
             message: {
                 type: "string",
-                description: "The message text to send",
+                description: "The message text to send to the user",
             },
         },
         required: ["message"],
@@ -41,14 +30,18 @@ export class SendMessageTool extends BaseTool {
             return "❌ No active reply context — cannot determine where to send the message.";
         }
 
+        // Use replyTo/replyChatId if set (e.g. scheduler jobs), otherwise fall back to source/chatId
+        const target = ctx.replyTo || ctx.source;
+        const chatId = ctx.replyChatId || ctx.chatId;
+
         outboundQueue.enqueue({
             id: crypto.randomUUID(),
-            target: ctx.source,
-            chatId: ctx.chatId,
+            target,
+            chatId,
             text: message,
             timestamp: Date.now(),
         });
 
-        return `✅ Message queued for delivery via ${ctx.source}.`;
+        return `✅ Message sent via ${target}.`;
     }
 }

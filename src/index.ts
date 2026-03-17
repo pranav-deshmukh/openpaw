@@ -136,14 +136,23 @@ async function main() {
   // Wire scheduler to inbound queue
   scheduler.onFire = (job) => {
     const userTz = job.timezone ?? "Asia/Kolkata";
+    const telegramChatId = process.env.TELEGRAM_CHAT_ID ?? "";
     console.log(`\n⏰ Scheduler firing: "${job.name}" → agent "${job.agentId}" at ${formatInTimezone(Date.now(), userTz)}`);
+
+    // For reminders: explicit prompt so agent just calls send_message without asking questions
+    const prompt = job.isHeartbeat
+      ? job.message
+      : `[SCHEDULED REMINDER] This reminder is now due. You MUST call send_message immediately with the text below. Do NOT ask questions, do NOT search memory first. Just send it.\n\nMessage to send: ${job.message}`;
+
     inboundQueue.enqueue({
       id: crypto.randomUUID(),
       source: "scheduler",
       chatId: job.agentId,
-      text: job.message,
+      text: prompt,
       agentId: job.agentId,
-      isolated: job.isolated,
+      isolated: true,
+      replyTo: "telegram",
+      replyChatId: telegramChatId,
       timestamp: Date.now(),
       isHeartbeat: job.isHeartbeat ?? false,
     });
