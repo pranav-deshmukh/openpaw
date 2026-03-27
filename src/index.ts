@@ -15,6 +15,7 @@ import {
 } from "./scheduler/scheduler-tools";
 
 import { TelegramChannel } from "./channel/telegram";
+import { WhatsAppChannel } from "./channel/whatsapp";
 import { channelRegistry } from "./channel/channel-registry";
 import { inboundQueue } from "./queue/message-queue";
 import { MessageProcessor } from "./queue/message-processor";
@@ -33,11 +34,17 @@ import { initHeartbeats } from "./scheduler/heartbeat";
 import { formatInTimezone } from "./scheduler/cron-utils";
 
 /* =====================================================
-   TELEGRAM CHANNEL
+   CHANNELS
 ===================================================== */
 
 const telegram = new TelegramChannel();
 channelRegistry.register("telegram", telegram);
+
+let whatsapp: WhatsAppChannel | null = null;
+if (process.env.WHATSAPP_ALLOWED_GROUP_ID) {
+  whatsapp = new WhatsAppChannel();
+  channelRegistry.register("whatsapp", whatsapp);
+}
 
 /* =====================================================
    OPENAI CLIENT
@@ -263,7 +270,7 @@ async function main() {
 }
 
 /* =====================================================
-   TELEGRAM INPUT → INBOUND QUEUE
+   CHANNEL INPUTS → INBOUND QUEUE
 ===================================================== */
 
 telegram.onMessage(async (text, chatId) => {
@@ -275,6 +282,20 @@ telegram.onMessage(async (text, chatId) => {
     timestamp: Date.now(),
   });
 });
+
+if (whatsapp) {
+  whatsapp.onMessage(async (text, chatId) => {
+    inboundQueue.enqueue({
+      id: crypto.randomUUID(),
+      source: "whatsapp",
+      chatId: String(chatId),
+      text,
+      timestamp: Date.now(),
+    });
+  });
+
+  whatsapp.initialize();
+}
 
 /* =====================================================
    START
