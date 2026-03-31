@@ -78,7 +78,9 @@ export class MessageProcessor {
         setReplyContext({ source: msg.source, chatId: msg.chatId, agentId, replyTo, replyChatId });
 
         try {
-            const response = await agent.chat(msg.text ?? "[No message provided]", msg.isolated);
+            // Each source:chatId combo gets its own isolated session
+            const sessionId = `${msg.source}:${msg.chatId}`;
+            const response = await agent.chat(msg.text ?? "[No message provided]", msg.isolated, sessionId);
 
             // Heartbeat: silent drop if nothing to report
             if (msg.isHeartbeat && isHeartbeatOk(response)) {

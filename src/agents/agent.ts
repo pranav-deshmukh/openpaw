@@ -54,7 +54,8 @@ export class Agent {
     private openai: OpenAI;
     private toolRegistry: ToolRegistry;
     private systemPrompt = "";
-    private conversationHistory: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [];
+    /** Session-partitioned conversation histories. Key = sessionId (e.g. "discord:12345"). */
+    private sessionHistories: Map<string, OpenAI.Chat.Completions.ChatCompletionMessageParam[]> = new Map();
 
     /** All tool definitions this agent is allowed to use in OpenAI format. */
     private agentTools: OpenAI.Chat.Completions.ChatCompletionTool[] = [];
@@ -183,13 +184,19 @@ export class Agent {
      * @param userInput  The user's message text.
      * @param isolated   If true, run without conversation history (overrides config.isolated).
      */
-    async chat(userInput: string, isolated?: boolean): Promise<string> {
+    async chat(userInput: string, isolated?: boolean, sessionId = "default"): Promise<string> {
         const isIsolated = isolated ?? this.config.isolated;
+
+        // Get or create session-specific history
+        if (!this.sessionHistories.has(sessionId)) {
+            this.sessionHistories.set(sessionId, []);
+        }
+        const history = this.sessionHistories.get(sessionId)!;
 
         // Build memory context block for this query (skip for isolated runs)
         const memoryContext = isIsolated
             ? ""
-            : await this.memory.buildContextBlock(userInput);
+            : await this.memory.buildContextBlock(userInput, sessionId);
 
         const systemPrompt = isIsolated
             ? this.systemPrompt
@@ -203,7 +210,7 @@ export class Agent {
             ]
             : [
                 { role: "system", content: systemPrompt },
-                ...this.conversationHistory,
+                ...history,
                 { role: "user", content: userInput },
             ];
 
@@ -217,14 +224,14 @@ export class Agent {
         const message = response.choices[0].message;
 
         if (!isIsolated) {
-            this.conversationHistory.push({ role: "user", content: userInput });
+            history.push({ role: "user", content: userInput });
 
             // Track in short-term memory
             this.memory.addToShortTerm({
                 role: "user",
                 content: userInput,
                 timestamp: Date.now(),
-            });
+            }, sessionId);
         }
 
         /* ---------- Iterative Tool Loop (supports chaining, e.g. search → fetch) ---------- */
@@ -235,7 +242,7 @@ export class Agent {
         for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
             if (!currentMessage.tool_calls) break;
 
-            if (!isIsolated) this.conversationHistory.push(currentMessage);
+            if (!isIsolated) history.push(currentMessage);
 
             for (const call of currentMessage.tool_calls) {
                 if (call.type !== "function") continue;
@@ -254,7 +261,7 @@ export class Agent {
                 }
 
                 if (!isIsolated) {
-                    this.conversationHistory.push({
+                    history.push({
                         role: "tool",
                         tool_call_id: call.id,
                         content: result,
@@ -267,7 +274,7 @@ export class Agent {
                 model: this.config.model,
                 messages: isIsolated
                     ? messages
-                    : [{ role: "system", content: systemPrompt }, ...this.conversationHistory],
+                    : [{ role: "system", content: systemPrompt }, ...history],
                 tools: this.agentTools.length > 0 ? this.agentTools : undefined,
                 tool_choice: this.agentTools.length > 0 ? "auto" : undefined,
             }));
@@ -281,7 +288,7 @@ export class Agent {
                 console.log(`\n[${this.config.id}] ${finalMessage}`);
 
                 if (!isIsolated) {
-                    this.conversationHistory.push({
+                    history.push({
                         role: "assistant",
                         content: finalMessage,
                     });
@@ -290,7 +297,7 @@ export class Agent {
                         role: "assistant",
                         content: finalMessage,
                         timestamp: Date.now(),
-                    });
+                    }, sessionId);
                 }
 
                 return finalMessage;
@@ -304,7 +311,7 @@ export class Agent {
         console.log(`\n[${this.config.id}] ${content}`);
 
         if (!isIsolated) {
-            this.conversationHistory.push({
+            history.push({
                 role: "assistant",
                 content,
             });
@@ -313,7 +320,7 @@ export class Agent {
                 role: "assistant",
                 content,
                 timestamp: Date.now(),
-            });
+            }, sessionId);
         }
 
         return content;
@@ -321,13 +328,17 @@ export class Agent {
 
     // ── Utilities ─────────────────────────────────────────────────────────────
 
-    /** Clear this agent's conversation history. */
-    clearHistory(): void {
-        this.conversationHistory = [];
+    /** Clear conversation history for a specific session, or all sessions. */
+    clearHistory(sessionId?: string): void {
+        if (sessionId) {
+            this.sessionHistories.delete(sessionId);
+        } else {
+            this.sessionHistories.clear();
+        }
     }
 
-    /** Get the number of messages in conversation history. */
-    get historyLength(): number {
-        return this.conversationHistory.length;
+    /** Get the number of messages in a session's conversation history. */
+    historyLength(sessionId = "default"): number {
+        return this.sessionHistories.get(sessionId)?.length ?? 0;
     }
 }

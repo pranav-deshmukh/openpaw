@@ -128,7 +128,8 @@ function serializeEntry(e: MemoryEntry): string {
 
 export class MemoryManager {
   private db!: BetterSQLiteDatabase;
-  private shortTerm: ShortTermMessage[] = [];
+  /** Session-partitioned short-term memory. Key = sessionId (e.g. "discord:12345"). */
+  private sessionShortTerm: Map<string, ShortTermMessage[]> = new Map();
   private dirty = false;
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -410,30 +411,43 @@ export class MemoryManager {
     }
   }
 
-  // ── Short-Term ────────────────────────────────────────────────────────────
+  // ── Short-Term (session-partitioned) ───────────────────────────────────────
 
-  addToShortTerm(msg: ShortTermMessage) {
-    this.shortTerm.push(msg);
-    if (this.shortTerm.length > this.maxShortTerm) {
-      this.shortTerm.shift();
+  private getSessionBucket(sessionId: string): ShortTermMessage[] {
+    if (!this.sessionShortTerm.has(sessionId)) {
+      this.sessionShortTerm.set(sessionId, []);
+    }
+    return this.sessionShortTerm.get(sessionId)!;
+  }
+
+  addToShortTerm(msg: ShortTermMessage, sessionId = "default") {
+    const bucket = this.getSessionBucket(sessionId);
+    bucket.push(msg);
+    if (bucket.length > this.maxShortTerm) {
+      bucket.shift();
     }
   }
 
-  getShortTerm(): ShortTermMessage[] {
-    return [...this.shortTerm];
+  getShortTerm(sessionId = "default"): ShortTermMessage[] {
+    return [...this.getSessionBucket(sessionId)];
   }
 
-  clearShortTerm() {
-    this.shortTerm = [];
+  clearShortTerm(sessionId?: string) {
+    if (sessionId) {
+      this.sessionShortTerm.delete(sessionId);
+    } else {
+      this.sessionShortTerm.clear();
+    }
   }
 
   /**
-   * Returns a condensed snapshot of recent short-term messages,
-   * suitable for injecting into a system prompt.
+   * Returns a condensed snapshot of recent short-term messages
+   * for a specific session, suitable for injecting into a system prompt.
    */
-  getShortTermSummary(): string {
-    if (this.shortTerm.length === 0) return "";
-    const lines = this.shortTerm
+  getShortTermSummary(sessionId = "default"): string {
+    const bucket = this.getSessionBucket(sessionId);
+    if (bucket.length === 0) return "";
+    const lines = bucket
       .slice(-10)
       .map((m) => `[${m.role}]: ${m.content.slice(0, 200)}`);
     return `Recent conversation (last ${lines.length} turns):\n${lines.join("\n")}`;
@@ -454,22 +468,30 @@ export class MemoryManager {
 
   /**
    * End-of-session flush: compress short-term into a summary log entry.
+   * If sessionId is provided, flushes only that session; otherwise flushes all.
    */
-  async flushSession(agentSummary?: string) {
-    const summary =
-      agentSummary ??
-      (this.shortTerm.length > 0
-        ? `Session ended with ${this.shortTerm.length} turns. Last user message: "${this.shortTerm.filter((m) => m.role === "user").pop()?.content?.slice(0, 200) ?? "N/A"}"`
-        : "Empty session.");
+  async flushSession(sessionId?: string, agentSummary?: string) {
+    if (sessionId) {
+      const bucket = this.getSessionBucket(sessionId);
+      const summary =
+        agentSummary ??
+        (bucket.length > 0
+          ? `Session [${sessionId}] ended with ${bucket.length} turns. Last user message: "${bucket.filter((m) => m.role === "user").pop()?.content?.slice(0, 200) ?? "N/A"}"`
+          : `Session [${sessionId}] — empty.`);
 
-    await this.save(summary, {
-      type: "log",
-      tags: ["session-summary", today()],
-      source: "system",
-    });
-
-    this.clearShortTerm();
-    console.log("💾 Session flushed to memory.");
+      await this.save(summary, {
+        type: "log",
+        tags: ["session-summary", sessionId, today()],
+        source: "system",
+      });
+      this.clearShortTerm(sessionId);
+      console.log(`💾 Session "${sessionId}" flushed to memory.`);
+    } else {
+      // Flush every active session
+      for (const [sid] of this.sessionShortTerm) {
+        await this.flushSession(sid, agentSummary);
+      }
+    }
   }
 
   // ── Context Injection ─────────────────────────────────────────────────────
@@ -479,7 +501,7 @@ export class MemoryManager {
    * Searches for the query term in long-term memory and includes
    * the short-term window.
    */
-  async buildContextBlock(query?: string): Promise<string> {
+  async buildContextBlock(query?: string, sessionId = "default"): Promise<string> {
     const parts: string[] = [];
 
     // Long-term relevant memories
@@ -495,8 +517,8 @@ export class MemoryManager {
       }
     }
 
-    // Short-term window
-    const st = this.getShortTermSummary();
+    // Short-term window (session-specific)
+    const st = this.getShortTermSummary(sessionId);
     if (st) {
       parts.push("## Recent Context");
       parts.push(st);
@@ -518,7 +540,7 @@ export class MemoryManager {
 
     return {
       totalEntries: entries.length,
-      shortTermLength: this.shortTerm.length,
+      activeSessions: this.sessionShortTerm.size,
       byType,
       memoryDir: this.memoryDir,
     };

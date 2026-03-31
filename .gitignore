@@ -12,3 +12,5 @@ dist/
 *.db
 
 .wwebjs_cache/
+
+temp/
