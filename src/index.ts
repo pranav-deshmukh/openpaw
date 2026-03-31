@@ -16,6 +16,7 @@ import {
 
 import { TelegramChannel } from "./channel/telegram";
 import { WhatsAppChannel } from "./channel/whatsapp";
+import { DiscordChannel } from "./channel/discord";
 import { channelRegistry } from "./channel/channel-registry";
 import { inboundQueue } from "./queue/message-queue";
 import { MessageProcessor } from "./queue/message-processor";
@@ -45,6 +46,9 @@ if (process.env.WHATSAPP_ALLOWED_GROUP_ID) {
   whatsapp = new WhatsAppChannel();
   channelRegistry.register("whatsapp", whatsapp);
 }
+
+let discord = new DiscordChannel();
+channelRegistry.register("discord", discord);
 
 /* =====================================================
    OPENAI CLIENT
@@ -296,6 +300,16 @@ if (whatsapp) {
 
   whatsapp.initialize();
 }
+
+discord.onMessage(async (text, channelId) => {
+  inboundQueue.enqueue({
+    id: crypto.randomUUID(),
+    source: "discord",
+    chatId: String(channelId),
+    text,
+    timestamp: Date.now(),
+  });
+});
 
 /* =====================================================
    START
